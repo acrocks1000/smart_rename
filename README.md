@@ -40,7 +40,7 @@
 
 ## 📸 Screenshots
 
-*(Add screenshots or GIFs here once you capture the UI in action.)*
+*![alt text](image.png)*
 
 ---
 
