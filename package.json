@@ -1,0 +1,64 @@
+{
+  "name": "smart-renamer",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder -w",
+    "dist:linux": "electron-builder -l",
+    "dist:mac": "electron-builder -m",
+    "dist": "electron-builder -wml"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.yourdomain.smartrenamer",
+    "productName": "Smart Renamer",
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "renderer/**",
+      "package.json"
+    ],
+    "extraResources": [],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "publisherName": "Your Name or Org"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  }
+}

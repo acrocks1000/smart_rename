@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Smart Renamer</title>
+  <style>
+    :root{--bg:#0b0f14;--card:#111823;--muted:#7a8699;--ok:#34c759;--warn:#ffcc00;--err:#ff453a;--ink:#e6edf3}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 18px;background:#0d1420;position:sticky;top:0;z-index:2;border-bottom:1px solid #1e2a3a}
+    .btn{padding:10px 14px;border:1px solid #2a3a52;border-radius:12px;background:#122032;color:var(--ink);cursor:pointer}
+    .btn:hover{background:#16263a}
+    .switch{display:flex;align-items:center;gap:8px;color:var(--muted)}
+    .chip{padding:6px 10px;border:1px dashed #2a3a52;border-radius:10px;color:var(--muted)}
+    main{padding:16px}
+    .grid{display:grid !important;grid-template-columns: 1.2fr 1.2fr 120px 120px 110px;gap:10px;align-items:center}
+    .head{color:#9fb0c6;font-weight:600;margin:10px 0}
+    .row{background:var(--card);padding:10px;border:1px solid #1b2736;border-radius:14px;display:contents}
+    input[type="text"]{width:100%;padding:9px 10px;border-radius:10px;border:1px solid #2a3a52;background:#0e1724;color:var(--ink)}
+    .status{font-weight:600}
+    .ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
+    footer{position:sticky;bottom:0;padding:12px 16px;background:#0d1420;border-top:1px solid #1e2a3a;display:flex;gap:10px;justify-content:space-between;align-items:center}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:#a8b3c7}
+    .subtle{color:#7a8699}
+  </style>
+</head>
+<body>
+  <header>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button id="pick" class="btn">📁 Choose Folder</button>
+      <label class="switch"><input type="checkbox" id="recursive"> Include subfolders</label>
+      <span id="folder" class="chip mono">No folder chosen</span>
+    </div>
+    <div style="display:flex; gap:10px;">
+      <button id="scan" class="btn">🔍 Scan</button>
+      <button id="rename" class="btn">✍️ Rename Selected</button>
+      <button id="loadBackup" class="btn">📄 Load Backup</button>
+      <button id="revertSelected" class="btn">⎌ Revert Selected</button>
+      <button id="revert" class="btn">⎌ Revert From Backup</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid head">
+      <div>Original</div>
+      <div>Proposed (editable)</div>
+      <div>Action</div>
+      <div>Status</div>
+      <div>Revert?</div>
+    </div>
+    <div id="list"></div>
+  </main>
+
+  <footer>
+    <span id="summary" class="mono">0 files</span>
+    <span id="backupInfo" class="subtle"></span>
+  </footer>
+
+  <script>
+    const $ = (q) => document.querySelector(q);
+    const listEl = $('#list');
+    let currentDir = null;
+    let rows = [];
+    let backupData = null;    // {version, createdAt, items:[{from,to}]}
+    let revertMode = false;   // enables 'Revert?' column interaction
+
+    const SMALL_WORDS = new Set(['of','the','and','a','an','to','in','on','for','at','by','or','vs','vs.']);
+    const SUFFIX_RE = /(-poster|-cover|-thumb)$/i; // preserved; posters force Ep.01
+
+    function smartTitleCase(str){
+      const parts = str.split(/\s+/).map((w,i)=>{
+        const lw = w.toLowerCase();
+        if(i>0 && SMALL_WORDS.has(lw)) return lw;
+        return lw.replace(/^[\p{L}0-9]/u, c=>c.toUpperCase());
+      });
+      return parts.join(' ');
+    }
+    function pad2(n){ n = String(n).replace(/\D/g,''); return n.length===1? '0'+n : n; }
+    function cleanTokens(s){
+      const BAD = /(\b(\d{3,4}p|x26[45]|hevc|hdrip|webrip|web[- ]?dl|bluray|dvdrip|brrip|aac|mp3|flac|dual\s*audio|multi\s*audio|sub(ed|bed)?|hindi|eng(lish)?|jpn|10bit|8bit)\b)/ig;
+      return s.replace(BAD, ' ');
+    }
+    function splitExt(base){
+      const i = base.lastIndexOf('.');
+      return i === -1 ? { stem: base, ext: '' } : { stem: base.slice(0,i), ext: base.slice(i) };
+    }
+
+    function parseAndPropose(base){
+      const { stem, ext } = splitExt(base);
+
+      // detect & strip preserved suffix
+      let suffix = '';
+      let core = stem;
+      const suf = core.match(SUFFIX_RE);
+      if(suf){ suffix = suf[0]; core = core.slice(0, -suffix.length); }
+
+      // strip bracket tags, replace separators, remove junk tokens
+      let s = core.replace(/[\[\(][^\]\)]*[\]\)]/g, ' ');
+      s = s.replace(/[._]+/g,' ');
+      s = s.replace(/\s{2,}/g,' ').trim();
+      s = cleanTokens(s);
+      s = s.replace(/\s{2,}/g,' ').trim();
+
+      // season/episode
+      let season = null, episode = null;
+      let m = s.match(/\bS?(\d{1,2})\s*E(p|pisode)?\s*(\d{1,3})\b/i); if(m){ season = m[1]; episode = m[3]; }
+      if(!episode){ m = s.match(/\bE(p|pisode)?[\s.:-]*?(\d{1,3})\b/i); if(m){ episode = m[2]; }}
+      if(!episode){ m = s.match(/\bS(eason)?\s*(\d{1,2})\s*[- ]\s*(\d{1,3})\b/i); if(m){ season = m[2]; episode = m[3]; }}
+      if(!season){ m = s.match(/\bS(eason)?\s*(\d{1,2})\b/i); if(m){ season = m[2]; }}
+      if(!episode){ m = s.match(/(?:\s|-|#)(\d{1,3})(?:\s*$|\s*part\b|\s*final\b)/i); if(m){ episode = m[1]; }}
+
+      // title before first token
+      let title = s;
+      const cutPatterns = [/\bS(eason)?\s*\d{1,2}\b/i, /\bE(p|pisode)?\s*\d{1,3}\b/i, /\bEp\b\.?\s*\d{1,3}/i];
+      for(const p of cutPatterns){ const idx = title.search(p); if(idx>0){ title = title.slice(0, idx); break; } }
+      title = title.replace(/[-_.]+/g,' ').replace(/\s{2,}/g,' ').trim();
+      title = smartTitleCase(title);
+
+      // posters/covers/thumbs → force Ep.01
+      if(suffix){ episode = '01'; }
+
+      let out;
+      if(season && episode){ out = `${title} S${parseInt(season,10)}-${pad2(episode)}`; }
+      else if(episode){ out = `${title} Ep.${pad2(episode)}`; }
+      else { out = title; }
+
+      if(suffix) out += suffix;
+      return { proposal: out + ext }; // keep original extension
+    }
+
+    function rowTemplate(obj){
+      const { base, dir } = obj;
+      const { proposal } = parseAndPropose(base);
+      const id = crypto.randomUUID();
+      return { id, dir, base, proposed: proposal, status: '', selected: true, revertTick: false };
+    }
+
+    function render(){
+      listEl.innerHTML = '';
+      for(const r of rows){
+        const wrap = document.createElement('div');
+        wrap.className = 'row grid';
+        wrap.innerHTML = `
+          <div class="mono">${r.base}</div>
+          <div><input type="text" value="${r.proposed}" data-id="${r.id}" class="edit"/></div>
+          <div>
+            <label class="switch"><input type="checkbox" class="accept" data-id="${r.id}" ${r.selected?'checked':''}> Accept</label>
+          </div>
+          <div class="status ${r.statusCls||''}">${r.status||''}</div>
+          <div>
+            <input type="checkbox" class="revert-tick" data-id="${r.id}" ${r.revertTick?'checked':''} ${revertMode?'':'disabled'}>
+          </div>
+        `;
+        listEl.appendChild(wrap);
+      }
+      $('#summary').textContent = `${rows.length} files`;
+
+      listEl.querySelectorAll('.edit').forEach(inp=>{
+        inp.addEventListener('input', (e)=>{
+          const id = e.target.dataset.id;
+          const r = rows.find(x=>x.id===id);
+          r.proposed = e.target.value;
+        });
+      });
+      listEl.querySelectorAll('.accept').forEach(chk=>{
+        chk.addEventListener('change', (e)=>{
+          const id = e.target.dataset.id;
+          const r = rows.find(x=>x.id===id);
+          r.selected = e.target.checked;
+        });
+      });
+      listEl.querySelectorAll('.revert-tick').forEach(chk=>{
+        chk.addEventListener('change', (e)=>{
+          const id = e.target.dataset.id;
+          const r = rows.find(x=>x.id===id);
+          r.revertTick = e.target.checked;
+        });
+      });
+    }
+
+    function ensureAPI(){
+      if(!('api' in window)){
+        alert('Preload bridge failed to load. Open DevTools → Console for details.');
+        console.error('window.api is undefined');
+        return false;
+      }
+      try { console.log('preload ping:', window.api.ping()); } catch(e) {}
+      return true;
+    }
+
+    async function chooseFolder(){
+      if(!ensureAPI()) return;
+      const dir = await window.api.selectFolder();
+      if(!dir) return;
+      currentDir = dir;
+      $('#folder').textContent = dir;
+      backupData = null; revertMode = false; $('#backupInfo').textContent = '';
+    }
+
+    async function scan(){
+      if(!currentDir){ alert('Choose a folder first'); return; }
+      const recursive = $('#recursive').checked;
+      const raw = await window.api.scanFolder({ dir: currentDir, recursive });
+      rows = raw.map(rowTemplate);
+      render();
+    }
+
+    async function renameSelected(){
+      if(!ensureAPI()) return;
+      const payload = rows
+        .filter(r=>r.selected && r.proposed && r.proposed !== r.base)
+        .map(r=>({ dir: r.dir, base: r.base, proposed: r.proposed }));
+      if(payload.length===0){ alert('Nothing to rename.'); return; }
+      const results = await window.api.applyRenames(payload);
+      for(const res of results){
+        const r = rows.find(x => x.dir===res.dir && x.base=== (res.base || res.from?.split(/[\\/]/).pop()));
+        if(!r) continue;
+        if(res.ok){
+          r.status = 'Renamed'; r.statusCls = 'ok';
+          r.base = r.proposed;
+        } else {
+          r.status = res.error || 'Failed'; r.statusCls = 'err';
+        }
+      }
+      render();
+
+      // surface backup path, if any
+      const firstWithBackup = results.find(r => r.backupPath);
+      if(firstWithBackup) $('#backupInfo').textContent = `Backup saved: ${firstWithBackup.backupPath}`;
+    }
+
+    // Full revert flow
+    async function revertFromBackup(){
+      if(!('api' in window)) { alert('Preload bridge missing.'); return; }
+      const backupPath = await window.api.pickBackup();
+      if(!backupPath) return;
+      const results = await window.api.revertRenames(backupPath);
+      const ok = results.filter(r=>r.ok).length;
+      const fail = results.length - ok;
+      alert(`Revert complete: ${ok} restored, ${fail} failed.`);
+      await scan();
+    }
+
+    // Load backup & enable revert selection mode
+    function findRowFull(r){ return (r.dir + '/' + r.base).replace(/\\/g,'/'); }
+    async function loadBackup(){
+      if(!('api' in window)) { alert('Preload bridge missing.'); return; }
+      const backupPath = await window.api.pickBackup();
+      if(!backupPath) return;
+      backupData = await window.api.readBackup(backupPath);
+      $('#backupInfo').textContent = `Loaded backup: ${backupPath} (items: ${backupData.items.length})`;
+
+      revertMode = true;
+      const toSet = new Set(backupData.items.map(x => x.to.replace(/\\/g,'/')));
+      rows.forEach(r => { r.revertTick = toSet.has(findRowFull(r)); });
+      render();
+    }
+
+    // Revert only selected mappings
+    async function revertSelected(){
+      if (!backupData || !Array.isArray(backupData.items)) {
+        alert('Load a backup first.'); return;
+      }
+      const selectedFulls = new Set(
+        rows.filter(r => r.revertTick).map(findRowFull)
+      );
+      const subset = backupData.items.filter(it => selectedFulls.has(it.to.replace(/\\/g,'/')));
+      if (!subset.length) { alert('No items selected to revert.'); return; }
+
+      const results = await window.api.revertSelected(subset);
+      const ok = results.filter(r=>r.ok).length;
+      const fail = results.length - ok;
+      alert(`Revert selected: ${ok} restored, ${fail} failed.`);
+      await scan();
+    }
+
+    // wire up
+    $('#pick').addEventListener('click', chooseFolder);
+    $('#scan').addEventListener('click', scan);
+    $('#rename').addEventListener('click', renameSelected);
+    $('#revert').addEventListener('click', revertFromBackup);
+    $('#loadBackup').addEventListener('click', loadBackup);
+    $('#revertSelected').addEventListener('click', revertSelected);
+  </script>
+</body>
+</html>
